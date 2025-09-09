@@ -29,21 +29,25 @@ class GPSMapDisplay:
         
         # Map variables
         self.current_location = None
-        self.map_center = (-0.787166, 51.617864)  # Default center (your coordinates)
+        self.map_center = (-0.787166, 51.617864)  # Default center
         self.zoom = 16
-        self.map_tile = None
         self.tile_size = 256
-        self.last_tile_coords = None  # (x, y, zoom)
+        self.tiles = {}  # Dictionary to store multiple tiles: {(x, y): tile_surface}
+        self.current_tile_coords = None  # Center tile coordinates
+        
+        # Calculate how many tiles we need to cover the display
+        self.tiles_x = math.ceil(WIDTH / self.tile_size) + 2  # +2 for buffer
+        self.tiles_y = math.ceil(HEIGHT / self.tile_size) + 2  # +2 for buffer
         
         # Tile cache setup
         self.cache_dir = "map_cache"
         os.makedirs(self.cache_dir, exist_ok=True)
         
         # Tile download settings
-        self.edge_buffer_percent = 0.10  # 10% buffer at edges
+        self.edge_buffer_percent = 0.20  # 20% buffer for smoother panning
         self.edge_buffer_pixels = int(self.tile_size * self.edge_buffer_percent)
         self.last_tile_download_time = 0
-        self.download_cooldown = 2.0  # seconds between tile downloads
+        self.download_cooldown = 1.0  # seconds between tile downloads
         
         # Colors
         self.colors = {
@@ -55,8 +59,8 @@ class GPSMapDisplay:
             'status_warn': (200, 200, 50),
         }
         
-        # Load initial map tile
-        self.load_map_tile()
+        # Load initial map tiles
+        self.load_map_tiles()
         
         # Start D-Bus listener in separate thread
         self.running = True
@@ -105,92 +109,27 @@ class GPSMapDisplay:
         except:
             pass
     
-    def need_new_tile(self, new_x, new_y, new_lon, new_lat):
-        """Determine if we need to download a new tile based on position"""
-        if self.last_tile_coords is None:
-            return True
-            
-        current_x, current_y, current_zoom = self.last_tile_coords
-        
-        # If zoom level changed or different tile coordinates, need new tile
-        if current_zoom != self.zoom or current_x != new_x or current_y != new_y:
-            return True
-            
-        # Calculate current pixel position within the current tile
-        current_pixel_x = int((new_lon - self.tile2lon(current_x, self.zoom)) * 
-                             self.tile_size / (self.tile2lon(current_x + 1, self.zoom) - 
-                             self.tile2lon(current_x, self.zoom)))
-        
-        current_pixel_y = int((new_lat - self.tile2lat(current_y, self.zoom)) * 
-                             self.tile_size / (self.tile2lat(current_y + 1, self.zoom) - 
-                             self.tile2lat(current_y, self.zoom)))
-        
-        # Check if we're too close to any edge (within 10% buffer zone)
-        near_left_edge = current_pixel_x < self.edge_buffer_pixels
-        near_right_edge = current_pixel_x > self.tile_size - self.edge_buffer_pixels
-        near_top_edge = current_pixel_y < self.edge_buffer_pixels
-        near_bottom_edge = current_pixel_y > self.tile_size - self.edge_buffer_pixels
-        
-        # If approaching any edge, we need to consider downloading adjacent tiles
-        return near_left_edge or near_right_edge or near_top_edge or near_bottom_edge
-    
-    def create_fallback_tile(self):
-        """Create a fallback tile when online loading fails"""
-        self.map_tile = pygame.Surface((self.tile_size, self.tile_size))
-        self.map_tile.fill((100, 100, 100))
+    def create_fallback_tile(self, x, y):
+        """Create a fallback tile for missing tiles"""
+        tile = pygame.Surface((self.tile_size, self.tile_size))
+        tile.fill((80, 80, 80))
         
         # Draw grid
         for i in range(0, self.tile_size, 32):
-            pygame.draw.line(self.map_tile, (150, 150, 150), (i, 0), (i, self.tile_size), 1)
-            pygame.draw.line(self.map_tile, (150, 150, 150), (0, i), (self.tile_size, i), 1)
+            pygame.draw.line(tile, (120, 120, 120), (i, 0), (i, self.tile_size), 1)
+            pygame.draw.line(tile, (120, 120, 120), (0, i), (self.tile_size, i), 1)
         
-        # Draw crosshair
-        pygame.draw.line(self.map_tile, (200, 200, 200), 
-                        (self.tile_size//2, 0), (self.tile_size//2, self.tile_size), 2)
-        pygame.draw.line(self.map_tile, (200, 200, 200), 
-                        (0, self.tile_size//2), (self.tile_size, self.tile_size//2), 2)
+        # Add tile coordinates
+        font = pygame.font.SysFont('Arial', 12)
+        text = font.render(f"{x},{y}", True, (180, 180, 180))
+        tile.blit(text, (10, 10))
         
-        # Add "No Tile" text
-        font = pygame.font.SysFont('Arial', 20)
-        text = font.render("No Map Data", True, (200, 200, 200))
-        self.map_tile.blit(text, (self.tile_size//2 - 60, self.tile_size//2 - 10))
+        return tile
     
-    def load_map_tile(self):
-        """Load map tile with smart downloading - only when needed"""
+    def download_tile(self, x, y, zoom):
+        """Download a single tile"""
         try:
-            current_time = time.time()
-            
-            # Check download cooldown
-            if current_time - self.last_tile_download_time < self.download_cooldown:
-                return
-                
-            lon, lat = self.map_center
-            
-            # Calculate tile coordinates
-            x = self.lon2tile(lon, self.zoom)
-            y = self.lat2tile(lat, self.zoom)
-            
-            # Check if we need a new tile
-            need_new_tile = self.need_new_tile(x, y, lon, lat)
-            
-            if not need_new_tile and self.map_tile is not None:
-                # Current tile is still good, no need to download
-                return
-                
-            self.last_tile_coords = (x, y, self.zoom)
-            
-            # Try to load from cache first
-            cached_tile = self.load_cached_tile(x, y, self.zoom)
-            if cached_tile:
-                self.map_tile = cached_tile
-                print(f"✅ Using cached tile: {x},{y}@{self.zoom}")
-                return
-                
-            # Download new tile
-            print(f"📡 Downloading new tile: {x},{y}@{self.zoom}")
-            self.last_tile_download_time = current_time
-            
-            url = f"https://tile.openstreetmap.org/{self.zoom}/{x}/{y}.png"
+            url = f"https://tile.openstreetmap.org/{zoom}/{x}/{y}.png"
             
             # Add headers to be polite to OSM servers
             headers = {
@@ -204,24 +143,86 @@ class GPSMapDisplay:
                 image_data = io.BytesIO(response.content)
                 pil_image = Image.open(image_data)
                 rgb_image = pil_image.convert('RGB')
-                mode = rgb_image.mode
-                size = rgb_image.size
                 data = rgb_image.tobytes()
                 
-                self.map_tile = pygame.image.fromstring(data, size, mode)
-                
-                # Save to cache
-                self.save_tile_to_cache(x, y, self.zoom, self.map_tile)
-                
-                print(f"✅ Tile downloaded and cached")
-                
+                tile = pygame.image.fromstring(data, rgb_image.size, rgb_image.mode)
+                self.save_tile_to_cache(x, y, zoom, tile)
+                return tile
             else:
-                print(f"❌ Failed to download tile: HTTP {response.status_code}")
-                self.create_fallback_tile()
+                print(f"❌ Failed to download tile {x},{y}: HTTP {response.status_code}")
+                return self.create_fallback_tile(x, y)
                 
         except Exception as e:
-            print(f"❌ Error loading map tile: {e}")
-            self.create_fallback_tile()
+            print(f"❌ Error downloading tile {x},{y}: {e}")
+            return self.create_fallback_tile(x, y)
+    
+    def get_tiles_to_load(self, center_x, center_y):
+        """Get all tile coordinates needed to fill the display"""
+        tiles_to_load = []
+        
+        # Calculate how many tiles we need in each direction
+        tiles_horizontal = math.ceil(WIDTH / self.tile_size) + 1
+        tiles_vertical = math.ceil(HEIGHT / self.tile_size) + 1
+        
+        # Calculate starting tile coordinates
+        start_x = center_x - tiles_horizontal // 2
+        start_y = center_y - tiles_vertical // 2
+        
+        # Generate all tile coordinates needed
+        for dx in range(tiles_horizontal + 1):
+            for dy in range(tiles_vertical + 1):
+                tile_x = start_x + dx
+                tile_y = start_y + dy
+                tiles_to_load.append((tile_x, tile_y))
+        
+        return tiles_to_load
+    
+    def load_map_tiles(self):
+        """Load all tiles needed to fill the display"""
+        try:
+            current_time = time.time()
+            
+            # Check download cooldown
+            if current_time - self.last_tile_download_time < self.download_cooldown:
+                return
+                
+            lon, lat = self.map_center
+            
+            # Calculate center tile coordinates
+            center_x = self.lon2tile(lon, self.zoom)
+            center_y = self.lat2tile(lat, self.zoom)
+            
+            # Check if we need to load new tiles
+            if (self.current_tile_coords and 
+                self.current_tile_coords == (center_x, center_y, self.zoom)):
+                return  # Same center tile, no need to reload
+                
+            self.current_tile_coords = (center_x, center_y, self.zoom)
+            self.last_tile_download_time = current_time
+            
+            print(f"🔄 Loading tiles for center: {center_x},{center_y}@{self.zoom}")
+            
+            # Get all tiles needed to fill the display
+            tiles_to_load = self.get_tiles_to_load(center_x, center_y)
+            
+            # Load or download each tile
+            new_tiles = {}
+            for x, y in tiles_to_load:
+                # Try to load from cache first
+                cached_tile = self.load_cached_tile(x, y, self.zoom)
+                if cached_tile:
+                    new_tiles[(x, y)] = cached_tile
+                else:
+                    # Download new tile
+                    tile = self.download_tile(x, y, self.zoom)
+                    new_tiles[(x, y)] = tile
+                    time.sleep(0.05)  # Be nice to OSM servers
+            
+            self.tiles = new_tiles
+            print(f"✅ Loaded {len(self.tiles)} tiles for display")
+            
+        except Exception as e:
+            print(f"❌ Error loading map tiles: {e}")
     
     def start_dbus_listener(self):
         """Start listening for GPSD signals on D-Bus"""
@@ -251,100 +252,90 @@ class GPSMapDisplay:
             if len(args) != 15:
                 return
             
-            # Parse GPS data according to GPSD documentation
-            timestamp = args[0]
-            mode = args[1]
-            time_uncertainty = args[2]
-            lat = args[3]
-            lon = args[4]
-            h_accuracy = args[5]
-            altitude = args[6]
-            v_accuracy = args[7]
-            course = args[8]
-            course_accuracy = args[9]
-            speed = args[10]
-            speed_accuracy = args[11]
-            climb = args[12]
-            climb_accuracy = args[13]
-            device = args[14]
+            # Parse GPS data
+            lat = float(args[3])
+            lon = float(args[4])
+            h_accuracy = float(args[5]) if not math.isnan(float(args[5])) else None
+            altitude = float(args[6]) if not math.isnan(float(args[6])) else None
+            speed = float(args[10]) if not math.isnan(float(args[10])) else None
+            mode = int(args[1])
             
-            # Convert NaN values to None
-            def safe_float(value):
-                try:
-                    float_val = float(value)
-                    if math.isnan(float_val):
-                        return None
-                    return float_val
-                except (ValueError, TypeError):
-                    return None
-            
-            new_location = {
-                'latitude': safe_float(lat),
-                'longitude': safe_float(lon),
-                'altitude': safe_float(altitude),
-                'accuracy': safe_float(h_accuracy),
-                'vertical_accuracy': safe_float(v_accuracy),
-                'speed': safe_float(speed),
-                'course': safe_float(course),
-                'climb_rate': safe_float(climb),
-                'mode': int(mode),
-                'device': str(device),
-                'timestamp': float(timestamp)
+            self.current_location = {
+                'latitude': lat,
+                'longitude': lon,
+                'altitude': altitude,
+                'accuracy': h_accuracy,
+                'speed': speed,
+                'mode': mode,
+                'timestamp': time.time()
             }
             
-            # Only update if we have valid coordinates
-            if new_location['latitude'] and new_location['longitude']:
-                self.current_location = new_location
-                
-                # Update map center to current position
-                old_center = self.map_center
-                self.map_center = (new_location['longitude'], new_location['latitude'])
-                
-                # Check if we need to load a new map tile
-                self.load_map_tile()
-                
-                # Print update (throttled)
-                if time.time() % 5 < 0.1:  # Print every ~5 seconds
-                    print(f"📍 GPS: {new_location['latitude']:.6f}, {new_location['longitude']:.6f}")
+            # Update map center to current position
+            old_center = self.map_center
+            self.map_center = (lon, lat)
+            
+            # Calculate tile coordinates
+            center_x = self.lon2tile(lon, self.zoom)
+            center_y = self.lat2tile(lat, self.zoom)
+            
+            # Check if we moved to a different tile or near edge
+            old_center_x = self.lon2tile(old_center[0], self.zoom) if old_center else None
+            old_center_y = self.lat2tile(old_center[1], self.zoom) if old_center else None
+            
+            if (old_center_x != center_x or old_center_y != center_y or 
+                not self.current_tile_coords):
+                self.load_map_tiles()
+            
+            # Print update occasionally
+            if time.time() % 5 < 0.1:
+                print(f"📍 GPS: {lat:.6f}, {lon:.6f} - Tile: {center_x},{center_y}")
             
         except Exception as e:
-            print(f"❌ Error processing GPS fix: {e}")
+            print(f"❌ Error processing GPS: {e}")
     
     def draw_map(self):
-        """Draw the map tile centered on current position"""
-        if self.map_tile:
-            # Calculate position to center the tile on current location
-            tile_x = self.lon2tile(self.map_center[0], self.zoom)
-            tile_y = self.lat2tile(self.map_center[1], self.zoom)
+        """Draw all tiles to fill the display"""
+        if not self.tiles or not self.current_tile_coords:
+            return
             
-            # Calculate pixel position within tile
-            pixel_x = int((self.map_center[0] - self.tile2lon(tile_x, self.zoom)) * 
-                         self.tile_size / (self.tile2lon(tile_x + 1, self.zoom) - 
-                         self.tile2lon(tile_x, self.zoom)))
+        center_x, center_y, zoom = self.current_tile_coords
+        lon, lat = self.map_center
+        
+        # Calculate pixel position within center tile
+        pixel_x = int((lon - self.tile2lon(center_x, zoom)) * 
+                     self.tile_size / (self.tile2lon(center_x + 1, zoom) - 
+                     self.tile2lon(center_x, zoom)))
+        
+        pixel_y = int((lat - self.tile2lat(center_y, zoom)) * 
+                     self.tile_size / (self.tile2lat(center_y + 1, zoom) - 
+                     self.tile2lat(center_y, zoom)))
+        
+        # Calculate offset to center the map on current position
+        offset_x = WIDTH // 2 - pixel_x
+        offset_y = HEIGHT // 2 - pixel_y
+        
+        # Draw all tiles
+        for (tile_x, tile_y), tile_surface in self.tiles.items():
+            # Calculate position of this tile
+            tile_screen_x = offset_x + (tile_x - center_x) * self.tile_size
+            tile_screen_y = offset_y + (tile_y - center_y) * self.tile_size
             
-            pixel_y = int((self.map_center[1] - self.tile2lat(tile_y, self.zoom)) * 
-                         self.tile_size / (self.tile2lat(tile_y + 1, self.zoom) - 
-                         self.tile2lat(tile_y, self.zoom)))
-            
-            # Calculate blit position to center the current location
-            blit_x = WIDTH // 2 - pixel_x
-            blit_y = HEIGHT // 2 - pixel_y
-            
-            # Draw the map tile
-            self.screen.blit(self.map_tile, (blit_x, blit_y))
+            # Only draw if tile is visible on screen
+            if (tile_screen_x + self.tile_size > 0 and tile_screen_x < WIDTH and
+                tile_screen_y + self.tile_size > 0 and tile_screen_y < HEIGHT):
+                self.screen.blit(tile_surface, (tile_screen_x, tile_screen_y))
     
     def draw_marker(self):
         """Draw the position marker"""
         if self.current_location:
-            # Draw a blue dot at the center of the screen
+            # Always draw marker at center of screen
             center_x, center_y = WIDTH // 2, HEIGHT // 2
             
             # Draw accuracy circle if available
             if self.current_location['accuracy']:
-                accuracy_pixels = int(self.current_location['accuracy'] * 3)  # Scale for visibility
-                accuracy_pixels = min(accuracy_pixels, 100)  # Cap the size
+                acc_px = min(int(self.current_location['accuracy'] * 3), 100)
                 pygame.draw.circle(self.screen, (255, 0, 0, 100), 
-                                 (center_x, center_y), accuracy_pixels, 1)
+                                 (center_x, center_y), acc_px, 1)
             
             # Draw blue marker
             pygame.draw.circle(self.screen, self.colors['marker'], (center_x, center_y), 8)
@@ -356,7 +347,7 @@ class GPSMapDisplay:
             return
         
         # Create semi-transparent background
-        panel = pygame.Surface((180, 90), pygame.SRCALPHA)
+        panel = pygame.Surface((200, 80), pygame.SRCALPHA)
         panel.fill((0, 0, 0, 180))
         self.screen.blit(panel, (10, 10))
         
@@ -369,7 +360,7 @@ class GPSMapDisplay:
         
         texts = [
             f"Lat: {lat:.6f}",
-            f"Lon: {lon:.6f}",
+            f"Lon: {lon:.6f}", 
             f"Alt: {alt:.0f}m  Acc: {acc:.0f}m",
             f"Spd: {spd:.1f}km/h  Zoom: {self.zoom}"
         ]
@@ -392,11 +383,16 @@ class GPSMapDisplay:
             status_color = self.colors['status_warn']
             time_text = "--:--:--"
         
+        # Show tile count
+        tile_text = f"Tiles: {len(self.tiles)}"
+        
         status_surface = self.font_medium.render(status_text, True, status_color)
         time_surface = self.font_small.render(time_text, True, (200, 200, 200))
+        tile_surface = self.font_small.render(tile_text, True, (200, 200, 200))
         
         self.screen.blit(status_surface, (10, HEIGHT - 16))
-        self.screen.blit(time_surface, (WIDTH - 60, HEIGHT - 16))
+        self.screen.blit(time_surface, (WIDTH - 80, HEIGHT - 16))
+        self.screen.blit(tile_surface, (WIDTH // 2 - 30, HEIGHT - 16))
     
     def run(self):
         """Main display loop"""
@@ -409,10 +405,10 @@ class GPSMapDisplay:
                         self.running = False
                     elif event.key == pygame.K_PLUS or event.key == pygame.K_EQUALS:
                         self.zoom = min(self.zoom + 1, 18)
-                        self.load_map_tile()  # Force reload on zoom change
+                        self.load_map_tiles()  # Reload all tiles on zoom change
                     elif event.key == pygame.K_MINUS:
                         self.zoom = max(self.zoom - 1, 2)
-                        self.load_map_tile()  # Force reload on zoom change
+                        self.load_map_tiles()  # Reload all tiles on zoom change
             
             # Clear screen
             self.screen.fill(self.colors['background'])
@@ -425,7 +421,7 @@ class GPSMapDisplay:
             
             # Update display
             pygame.display.flip()
-            self.clock.tick(10)  # 10 FPS is sufficient for map display
+            self.clock.tick(10)  # 10 FPS
         
         pygame.quit()
 
