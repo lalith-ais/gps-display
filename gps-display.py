@@ -24,8 +24,8 @@ class GPSMapDisplay:
         self.clock = pygame.time.Clock()
         
         # Load fonts
-        self.font_small = pygame.font.SysFont('Arial', 10)
-        self.font_medium = pygame.font.SysFont('Arial', 12)
+        self.font_small = pygame.font.SysFont('Arial', 12)
+        self.font_medium = pygame.font.SysFont('Arial', 16)
         
         # Map variables
         self.current_location = None
@@ -359,10 +359,11 @@ class GPSMapDisplay:
         spd = (self.current_location['speed'] or 0) * 3.6  # Convert to km/h
         
         texts = [
-            f"Lat: {lat:.6f}",
-            f"Lon: {lon:.6f}", 
-            f"Alt: {alt:.0f}m  Acc: {acc:.0f}m",
-            f"Spd: {spd:.1f}km/h  Zoom: {self.zoom}"
+            f"Latitude: {lat:.6f}",
+            f"Longitude: {lon:.6f}", 
+            f"Altitude: {alt:.0f}m",
+            f"Accuracy: {acc:.0f}m",
+            f"Speed: {spd:.1f}km/h"
         ]
         
         for i, text in enumerate(texts):
