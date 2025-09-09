@@ -347,8 +347,8 @@ class GPSMapDisplay:
             return
         
         # Create semi-transparent background
-        panel = pygame.Surface((200, 80), pygame.SRCALPHA)
-        panel.fill((0, 0, 0, 180))
+        panel = pygame.Surface((150, 80), pygame.SRCALPHA)
+        panel.fill((0, 0, 0, 127))
         self.screen.blit(panel, (10, 10))
         
         # Display coordinates and info
